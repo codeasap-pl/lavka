@@ -70,6 +70,7 @@ class CaseGroup(Base):
 
     def add_case(self,
                  func: T.Callable,
+                 /,
                  args: T.Optional[tuple] = None,
                  kwargs: T.Optional[dict] = None,
                  identifier: T.Optional[str] = None):
@@ -120,14 +121,14 @@ class Benchmark:
 
     def add_case(self,
                  func: T.Callable,
-                 positional_args: tuple,
-                 keyword_args: dict,
                  /,
+                 args: T.Optional[tuple] = None,
+                 kwargs: T.Optional[dict] = None,
                  identifier: T.Optional[str] = None):
         return self.groups["default"].add_case(
             func,
-            positional_args,
-            keyword_args,
+            args=args,
+            kwargs=args,
             identifier=identifier,
         )
 
