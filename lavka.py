@@ -145,10 +145,17 @@ class Benchmark:
             )
         )
 
-    def __call__(self, *args, **kwargs):
-        return self.run(**kwargs)
+    def __call__(self,
+                 po: T.Optional[argparse.ArgumentParser] = None,
+                 **kwargs):
+        return self.run(po, **kwargs)
 
-    def run(self, **kwargs):
+    def run(self,
+            po: T.Optional[argparse.ArgumentParser] = None,
+            **kwargs):
+
+        kwargs.update(**po.__dict__) if po else ...
+
         for attr in self.cfg.__annotations__.keys():
             print(attr, kwargs.get(attr, getattr(self.cfg, attr)))
 
