@@ -22,6 +22,13 @@ def _mkseq(cls):
 
 
 @dataclasses.dataclass
+class Config:
+    normalize: bool = False
+    n_times: int = 1
+    plots_dir: str = "/tmp/benchmark-plots"
+
+
+@dataclasses.dataclass
 class Base(object):
     identifier: T.Optional[str] = None
 
@@ -60,8 +67,11 @@ class Case(Base):
     def __str__(self):
         return self.identifier or self.func.__qualname__
 
-    def __call__(self, po: argparse.Namespace):
-        return self.func(*self.positional_args, **self.keyword_args)
+    def __call__(self, *args, **kwargs):
+        return self.func(
+            *(self.positional_args or []),
+            **(self.keyword_args or {})
+        )
 
 
 @dataclasses.dataclass
@@ -81,7 +91,7 @@ class CaseGroup(Base):
                 func=func,
                 positional_args=(args or tuple()),
                 keyword_args=(kwargs or dict()),
-                identifier=identifier,
+                identifier=(identifier or func.__qualname__),
             )
         self.cases.append(case)
         return case
@@ -109,9 +119,10 @@ class Benchmark:
         }
 
         self.results = {}
+        self.cfg = Config()
 
-    def on_setup(self, po: argparse.Namespace): ...
-    def on_teardown(self, po: argparse.Namespace): ...
+    def on_setup(self, *args, **kwargs): ...
+    def on_teardown(self, *args, **kwargs): ...
 
     def add_group(self, name: T.Optional[str] = None) -> CaseGroup:
         assert not name or name not in self.groups, "Group: " + (name or "")
@@ -126,13 +137,27 @@ class Benchmark:
                  kwargs: T.Optional[dict] = None,
                  identifier: T.Optional[str] = None):
         return self.groups["default"].add_case(
-            func,
-            args=args,
-            kwargs=args,
-            identifier=identifier,
+            Case(
+                func=func,
+                positional_args=args,
+                keyword_args=kwargs,
+                identifier=(identifier or func.__qualname__),
+            )
         )
 
-    def __call__(self, po: argparse.Namespace):
+    def __call__(self, *args, **kwargs):
+        return self.run(**kwargs)
+
+    def run(self, **kwargs):
+        for attr in self.cfg.__annotations__.keys():
+            print(attr, kwargs.get(attr, getattr(self.cfg, attr)))
+
+        # unhacking...
+        [
+            setattr(self.cfg, attr, kwargs.pop(attr, getattr(self.cfg, attr)))
+            for attr in self.cfg.__annotations__.keys()
+        ]
+
         for group_name, group in self.groups.items():
             if group:
                 self.results[group_name] = []
@@ -140,33 +165,32 @@ class Benchmark:
                 print("→", str(group))
                 for case in group:
                     self.results[group_name].append(
-                        self._run_case(po, case)
+                        self._run_case(case)
                     )
-        print_results(po, self.results)
-        self.create_plots(po)
+        print_results(self.results)
+        self.create_plots()
 
-    def _run_case(self, po, case):
-        case.result.n_times = n_times = po.n_times
-        n_ticks = po.n_ticks
+    def _run_case(self, case):
+        case.result.n_times = n_times = self.cfg.n_times
+        n_ticks = n_times
         print("   → %24s %8d" % (case, n_times), end=" ")
         sys.stdout.flush()
-        case.result.dt_points = {
-            k: 0 for k in range(0, n_times, int(n_times / n_ticks))
-        }
 
-        self.on_setup(po)
+        case.result.dt_points = {k: 0 for k in range(0, n_times, n_ticks)}
+
+        self.on_setup()
         t0 = time.monotonic()
         tp = time.monotonic()
+
         try:
             for i in range(n_times):
-                case(po)
-                if n_ticks and i in case.result.dt_points:
-                    tmp_t = time.monotonic()
-                    case.result.dt_points[i] = tmp_t - tp
-                    tp = tmp_t
+                case(cfg=self.cfg)
+                tmp_t = time.monotonic()
+                case.result.dt_points[i] = tmp_t - tp
+                tp = tmp_t
             case.result.total_time = time.monotonic() - t0
         finally:
-            self.on_teardown(po)
+            self.on_teardown()
         print(round(case.result.total_time, 8))
         return case
 
@@ -175,50 +199,66 @@ class Benchmark:
         parser.add_argument("-N", "--normalize", action="store_true")
         parser.add_argument("-t", "--n-times", type=int,
                             default=kwargs.pop("n_times", 2 ** 10))
-        parser.add_argument("-x", "--n-ticks", type=int,
-                            default=kwargs.pop("n_ticks", 64))
         parser.add_argument("-o", "--plots-dir", type=str,
                             default="/tmp/benchmark-plots")
         return parser
 
-    def create_plots(self, po):
-        os.makedirs(po.plots_dir, exist_ok=True)
+    def create_plots(self):
+        plots_dir = self.cfg.plots_dir
+        normalize = self.cfg.normalize
+        os.makedirs(plots_dir, exist_ok=True)
+
+        n_times = self.cfg.n_times
         for group_name, cases in self.results.items():
             if not self.groups[group_name]:
                 continue
-            fig = plt.Figure(figsize=(16, 9), tight_layout=True)
-            for case in cases:
-                xs = case.result.dt_points.keys()
-                ys = case.result.dt_points.values()
-                if po.normalize:
-                    miny, maxy = (min(ys), max(ys))
-                    ys = [(y - miny) / (maxy - miny) for y in ys]  # normalized
-                fig.gca().plot(xs, ys, label=case.identifier)
+
+            if n_times == 1:
+                results = []
+                labels = []
+                fig = plt.Figure(figsize=(16, 9), tight_layout=True)
+                for case in cases:
+                    _ = case.result.dt_points.keys()
+                    ys = case.result.dt_points[0]
+                    results.append(ys)
+                    labels.append(str(case))
+
+                fig.gca().bar(labels, results, width=0.5)
+            else:
+                fig = plt.Figure(figsize=(16, 9), tight_layout=True)
+                for case in cases:
+                    xs = case.result.dt_points.keys()
+                    ys = case.result.dt_points.values()
+                    if normalize:
+                        miny, maxy = (min(ys), max(ys))
+                        ys = [(y - miny) / (maxy - miny) for y in ys]
+                    fig.gca().plot(xs, ys, label=str(case))
+
+                fig.gca().set_ylabel("Δt", fontsize="x-large")
+                fig.gca().set_xlabel("loops", fontsize="x-large")
+                fig.legend(fontsize=12)
 
             title = "%s: %s" % (
                 group_name,
                 " / ".join([str(c) for c in cases])
             )
-            title += "\n(normalized)" if po.normalize else ""
-            fig.suptitle(title, fontsize=32, fontweight="bold")
+            title += "\n(normalized)" if normalize else ""
+            fig.suptitle(title, fontsize=24, fontweight="bold")
 
-            fig.gca().set_ylabel("Δt", fontsize="x-large")
-            fig.gca().set_xlabel("loops", fontsize="x-large")
-            fig.legend(fontsize=16)
             fig.gca().grid(True)
 
             filename = group_name.replace(" ", "-").replace("/", "-")
             filename = "".join([
                 filename,
-                "-normalized" if po.normalize else "",
+                "-normalized" if normalize else "",
                 ".png"
             ])
-            filename = os.path.join(po.plots_dir, filename)
+            filename = os.path.join(plots_dir, filename)
             fig.savefig(filename)
             print("PLOT", group_name, filename)
 
 
-def print_results(po, results):
+def print_results(results, **kwargs):
     _str = (lambda w: lambda v: str(v)[:w])
     _flt = (lambda p: lambda v: str(round(float(v), p)))
 
@@ -273,4 +313,4 @@ if __name__ == "__main__":
 
     parser = b.create_parser()
     args = parser.parse_args()
-    b(args)
+    b(**args.__dict__)
